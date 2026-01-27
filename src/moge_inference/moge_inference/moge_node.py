@@ -82,7 +82,7 @@ class MoGeNode(Node):
         super().__init__('moge_inference_node')
         
         self.declare_parameter('engine_path', '')
-        self.declare_parameter('input_topic', '/camera/camera/color/image_raw')
+        self.declare_parameter('input_topic', '/camera/color/image_raw')
         self.declare_parameter('output_frame_id', 'camera_color_optical_frame')
 
         engine_path = self.get_parameter('engine_path').value
