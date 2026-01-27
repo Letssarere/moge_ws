@@ -11,6 +11,7 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 import time
 import std_msgs.msg 
+import importlib.resources as pkg_resources
 
 # TensorRT 로거 설정
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
@@ -88,12 +89,12 @@ class MoGeNode(Node):
         input_topic = self.get_parameter('input_topic').value
         self.frame_id = self.get_parameter('output_frame_id').value
 
-        if not engine_path:
-            self.get_logger().error("Please provide 'engine_path' parameter!")
-            exit(1)
-
         try:
-            self.trt_model = TRTInference(engine_path)
+            if engine_path:
+                self.trt_model = TRTInference(engine_path)
+            else:
+                self.get_logger().info("No engine_path provided. Using packaged engine.")
+                self.trt_model = self._load_packaged_engine()
             self.get_logger().info("TensorRT Engine Loaded Successfully!")
         except Exception as e:
             self.get_logger().error(f"Failed to load engine: {e}")
@@ -106,6 +107,19 @@ class MoGeNode(Node):
         self.pub_norm_vis = self.create_publisher(Image, '/moge/normal_vis', 10)
 
         self.get_logger().info(f"Subscribing to {input_topic}...")
+
+    def _load_packaged_engine(self):
+        resource_path = 'models/moge2_vits_fp16.engine'
+        if hasattr(pkg_resources, 'files') and hasattr(pkg_resources, 'as_file'):
+            resource = pkg_resources.files('moge_inference').joinpath(resource_path)
+            with pkg_resources.as_file(resource) as engine_file:
+                return TRTInference(str(engine_file))
+
+        if hasattr(pkg_resources, 'path'):
+            with pkg_resources.path('moge_inference', resource_path) as engine_file:
+                return TRTInference(str(engine_file))
+
+        raise RuntimeError('importlib.resources does not support package data access')
 
     def image_callback(self, msg):
         try:
