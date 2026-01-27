@@ -84,10 +84,13 @@ class MoGeNode(Node):
         self.declare_parameter('engine_path', '')
         self.declare_parameter('input_topic', '/camera/color/image_raw')
         self.declare_parameter('output_frame_id', 'camera_color_optical_frame')
+        self.declare_parameter('rgb_input', True)
 
         engine_path = self.get_parameter('engine_path').value
         input_topic = self.get_parameter('input_topic').value
         self.frame_id = self.get_parameter('output_frame_id').value
+        self.rgb_input = self.get_parameter('rgb_input').value
+        self._logged_color_stats = False
 
         try:
             if engine_path:
@@ -127,6 +130,16 @@ class MoGeNode(Node):
         except Exception as e:
             self.get_logger().error(f"CvBridge Error: {e}")
             return
+        
+        if self.rgb_input:
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            if not self._logged_color_stats:
+                mean_vals = cv_image.mean(axis=(0, 1))
+                self.get_logger().info(
+                    f"RGB input enabled. Channel means: "
+                    f"R={mean_vals[0]:.1f}, G={mean_vals[1]:.1f}, B={mean_vals[2]:.1f}"
+                )
+                self._logged_color_stats = True
 
         outputs, img_resized = self.trt_model.infer(cv_image)
         
