@@ -85,12 +85,20 @@ class MoGeNode(Node):
         self.declare_parameter('input_topic', '/camera/color/image_raw')
         self.declare_parameter('output_frame_id', 'camera_color_optical_frame')
         self.declare_parameter('rgb_input', True)
+        self.declare_parameter('debug_stats', False)
+        self.declare_parameter('mask_threshold', 0.5)
+        self.declare_parameter('sanitize_nan_vis', True)
 
         engine_path = self.get_parameter('engine_path').value
         input_topic = self.get_parameter('input_topic').value
         self.frame_id = self.get_parameter('output_frame_id').value
         self.rgb_input = self.get_parameter('rgb_input').value
+        self.debug_stats = self.get_parameter('debug_stats').value
+        self.mask_threshold = self.get_parameter('mask_threshold').value
+        self.sanitize_nan_vis = self.get_parameter('sanitize_nan_vis').value
         self._logged_color_stats = False
+        self._logged_output_stats = False
+        self._warned_nan = False
 
         try:
             if engine_path:
@@ -131,6 +139,7 @@ class MoGeNode(Node):
             self.get_logger().error(f"CvBridge Error: {e}")
             return
         
+        color_image = cv_image
         if self.rgb_input:
             cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
             if not self._logged_color_stats:
@@ -142,6 +151,12 @@ class MoGeNode(Node):
                 self._logged_color_stats = True
 
         outputs, img_resized = self.trt_model.infer(cv_image)
+        if self.debug_stats and not self._logged_output_stats:
+            self._log_tensor_stats('points', outputs.get('points'))
+            self._log_tensor_stats('mask', outputs.get('mask'))
+            self._log_tensor_stats('scale', outputs.get('scale'))
+            self._log_tensor_stats('normal', outputs.get('normal'))
+            self._logged_output_stats = True
         
         points_raw = outputs.get('points', None)
         mask_raw = outputs.get('mask', None)
@@ -151,13 +166,45 @@ class MoGeNode(Node):
         if points_raw is None:
             return
 
-        self.publish_pointcloud(points_raw, mask_raw, scale_raw, img_resized)
+        # Use original BGR for colors even when RGB input is enabled.
+        if self.trt_model.input_shape is not None and len(self.trt_model.input_shape) == 4:
+            target_h, target_w = self.trt_model.input_shape[2], self.trt_model.input_shape[3]
+            color_resized = cv2.resize(color_image, (target_w, target_h))
+        else:
+            color_resized = color_image
+
+        self.publish_pointcloud(points_raw, mask_raw, scale_raw, color_resized)
         
         if normal_raw is not None:
             self.publish_normal_vis(normal_raw)
 
+    def _log_tensor_stats(self, name, tensor):
+        if tensor is None:
+            self.get_logger().info(f"{name}: None")
+            return
+        arr = np.array(tensor)
+        nan_count = int(np.isnan(arr).sum())
+        inf_count = int(np.isinf(arr).sum())
+        try:
+            min_val = float(np.nanmin(arr))
+            max_val = float(np.nanmax(arr))
+        except ValueError:
+            min_val = float('nan')
+            max_val = float('nan')
+        self.get_logger().info(
+            f"{name}: shape={arr.shape} dtype={arr.dtype} "
+            f"min={min_val:.4f} max={max_val:.4f} nan={nan_count} inf={inf_count}"
+        )
+
     def publish_normal_vis(self, normal_tensor):
         normal_img = normal_tensor[0]
+        if normal_img.ndim == 3 and normal_img.shape[0] == 3 and normal_img.shape[-1] != 3:
+            normal_img = np.transpose(normal_img, (1, 2, 0))
+        if self.sanitize_nan_vis and (np.isnan(normal_img).any() or np.isinf(normal_img).any()):
+            if not self._warned_nan:
+                self.get_logger().warn("normal contains NaN/Inf; sanitizing for visualization.")
+                self._warned_nan = True
+            normal_img = np.nan_to_num(normal_img, nan=0.0, posinf=1.0, neginf=-1.0)
         normal_vis = ((normal_img + 1) * 127.5).clip(0, 255).astype(np.uint8)
         normal_vis = cv2.cvtColor(normal_vis, cv2.COLOR_RGB2BGR)
         
@@ -171,7 +218,23 @@ class MoGeNode(Node):
         if scale is not None:
             points = points * scale[0]
 
-        valid_mask = mask[0, 0] > 0.5 
+        mask_2d = None
+        if mask is not None:
+            mask_2d = mask[0]
+            if mask_2d.ndim == 3:
+                if mask_2d.shape[0] == 1:
+                    mask_2d = mask_2d[0]
+                elif mask_2d.shape[-1] == 1:
+                    mask_2d = mask_2d[:, :, 0]
+        if mask_2d is None:
+            self.get_logger().warn("Mask is missing; skipping pointcloud publish.")
+            return
+
+        valid_mask = np.isfinite(mask_2d) & (mask_2d > self.mask_threshold)
+        if not np.any(valid_mask):
+            if self.debug_stats:
+                self.get_logger().warn("Mask has no valid points above threshold.")
+            return
         valid_points = points[valid_mask] 
         valid_colors = color_img[valid_mask] 
 
