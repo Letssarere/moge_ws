@@ -106,6 +106,11 @@ class MoGeNode(Node):
             else:
                 self.get_logger().info("No engine_path provided. Using packaged engine.")
                 self.trt_model = self._load_packaged_engine()
+            try:
+                output_names = [o.get('name') for o in self.trt_model.outputs]
+            except Exception:
+                output_names = []
+            self.get_logger().info(f"TensorRT outputs: {output_names}")
             self.get_logger().info("TensorRT Engine Loaded Successfully!")
         except Exception as e:
             self.get_logger().error(f"Failed to load engine: {e}")
